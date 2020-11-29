@@ -272,6 +272,7 @@ struct rjd_gfx_pipeline_state
 enum rjd_gfx_primitive_type
 {
 	RJD_GFX_PRIMITIVE_TYPE_TRIANGLES,
+	RJD_GFX_PRIMITIVE_TYPE_INDEXED_TRIANGLES,
 };
 
 enum rjd_gfx_index_type
@@ -283,8 +284,9 @@ enum rjd_gfx_index_type
 enum rjd_gfx_mesh_buffer_usage_flags
 {
 	RJD_GFX_MESH_BUFFER_USAGE_VERTEX = 1 << 0,
-	RJD_GFX_MESH_BUFFER_USAGE_VERTEX_CONSTANT = 1 << 1,
-	RJD_GFX_MESH_BUFFER_USAGE_PIXEL_CONSTANT = 1 << 2,
+	RJD_GFX_MESH_BUFFER_USAGE_INDEX = 1 << 1,
+	RJD_GFX_MESH_BUFFER_USAGE_VERTEX_CONSTANT = 1 << 2,
+	RJD_GFX_MESH_BUFFER_USAGE_PIXEL_CONSTANT = 1 << 3,
 };
 
 union rjd_gfx_mesh_buffer_common_desc
@@ -315,6 +317,7 @@ struct rjd_gfx_mesh_vertexed_desc
 	struct rjd_gfx_mesh_buffer_desc* buffers;
 	uint32_t count_buffers;
 	uint32_t count_vertices;
+	uint32_t count_indices;
 };
 
 //struct rjd_gfx_mesh_indexed_desc

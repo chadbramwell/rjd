@@ -28,6 +28,8 @@ struct ID3D11ModuleInstance;
 #undef CINTERFACE
 #undef COBJMACROS
 
+#define HACKY_DEPTHSTENCIL
+
 ////////////////////////////////////////////////////////////////////////////////
 // Local helpers
 
@@ -76,11 +78,18 @@ struct rjd_gfx_mesh_buffer_d3d11
 
 struct rjd_gfx_mesh_d3d11
 {
-	struct rjd_gfx_mesh_buffer_d3d11* buffers;
+	enum rjd_gfx_primitive_type primitive;
+	struct rjd_gfx_mesh_buffer_d3d11* buffers; // only difference from rjd_gfx_mesh_vertexed_desc
 	uint32_t count_buffers;
 	uint32_t count_vertices;
-	enum rjd_gfx_primitive_type primitive;
+	uint32_t count_indices;
 };
+RJD_STATIC_ASSERT(sizeof(struct rjd_gfx_mesh_d3d11) == sizeof(struct rjd_gfx_mesh_vertexed_desc));
+RJD_STATIC_ASSERT(offsetof(struct rjd_gfx_mesh_d3d11, primitive) == offsetof(struct rjd_gfx_mesh_vertexed_desc, primitive));
+RJD_STATIC_ASSERT(offsetof(struct rjd_gfx_mesh_d3d11, buffers) == offsetof(struct rjd_gfx_mesh_vertexed_desc, buffers));
+RJD_STATIC_ASSERT(offsetof(struct rjd_gfx_mesh_d3d11, count_buffers) == offsetof(struct rjd_gfx_mesh_vertexed_desc, count_buffers));
+RJD_STATIC_ASSERT(offsetof(struct rjd_gfx_mesh_d3d11, count_vertices) == offsetof(struct rjd_gfx_mesh_vertexed_desc, count_vertices));
+RJD_STATIC_ASSERT(offsetof(struct rjd_gfx_mesh_d3d11, count_indices) == offsetof(struct rjd_gfx_mesh_vertexed_desc, count_indices));
 
 struct rjd_gfx_command_buffer_d3d11
 {
@@ -538,7 +547,7 @@ struct rjd_result rjd_gfx_command_pass_begin(struct rjd_gfx_context* context, st
 
 			ID3D11Texture2D_Release(texture_backbuffer);
 		}
-
+#ifdef HACKY_DEPTHSTENCIL
 		// DepthStencilView
 		// XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX TODO: Circle back and verify there aren't any memory/resource leaks here and we could proably move most of this to an init stage
 		{
@@ -604,6 +613,7 @@ struct rjd_result rjd_gfx_command_pass_begin(struct rjd_gfx_context* context, st
 				return rjd_gfx_translate_hresult(hr);
 			}
 		}
+#endif//HACKY_DEPTHSTENCIL
 
 	} else {
 		RJD_ASSERTFAIL("non-backbuffer render targets are unimplemented"); // TODO
@@ -612,8 +622,10 @@ struct rjd_result rjd_gfx_command_pass_begin(struct rjd_gfx_context* context, st
 	struct rjd_gfx_rgba rgba_backbuffer = rjd_gfx_format_value_to_rgba(command->clear_color);
 	ID3D11DeviceContext_ClearRenderTargetView(cmd_buffer_d3d11->deferred_context, cmd_buffer_d3d11->render_target, rgba_backbuffer.v);
 
+#ifdef HACKY_DEPTHSTENCIL
 	// XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX TODO: use command->clear_depthstencil (right now it is missing info that D3D11 expects)
 	ID3D11DeviceContext_ClearDepthStencilView(cmd_buffer_d3d11->deferred_context, cmd_buffer_d3d11->depth_stencil, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
+#endif//HACKY_DEPTHSTENCIL
 
 	return RJD_RESULT_OK();
 }
@@ -638,7 +650,11 @@ struct rjd_result rjd_gfx_command_pass_draw(struct rjd_gfx_context* context, str
 	ID3D11DeviceContext1_IASetInputLayout(cmd_buffer_d3d11->deferred_context, pipeline_state_d3d11->vertex_layout);
 	ID3D11DeviceContext1_RSSetState(cmd_buffer_d3d11->deferred_context, pipeline_state_d3d11->rasterizer_state);
 
+#ifdef HACKY_DEPTHSTENCIL
 	ID3D11DeviceContext1_OMSetRenderTargets(cmd_buffer_d3d11->deferred_context, 1, &cmd_buffer_d3d11->render_target, cmd_buffer_d3d11->depth_stencil);
+#else
+	ID3D11DeviceContext1_OMSetRenderTargets(cmd_buffer_d3d11->deferred_context, 1, &cmd_buffer_d3d11->render_target, NULL);
+#endif//HACKY_DEPTHSTENCIL
 
 	struct rjd_gfx_shader_d3d11* shader_vertex_d3d11 = rjd_slotmap_get(context_d3d11->slotmap_shaders, pipeline_state_d3d11->shader_vertex.handle);
 	struct rjd_gfx_shader_d3d11* shader_pixel_d3d11 = rjd_slotmap_get(context_d3d11->slotmap_shaders, pipeline_state_d3d11->shader_pixel.handle);
@@ -693,6 +709,14 @@ struct rjd_result rjd_gfx_command_pass_draw(struct rjd_gfx_context* context, str
 					&buffer_d3d11->offset);
 			}
 
+			if (buffer_d3d11->usage_flags & RJD_GFX_MESH_BUFFER_USAGE_INDEX) {
+				ID3D11DeviceContext1_IASetIndexBuffer(
+					cmd_buffer_d3d11->deferred_context,
+					buffer_d3d11->buffer,
+					DXGI_FORMAT_R32_UINT, // Only allowed formats: DXGI_FORMAT_R16_UINT, DXGI_FORMAT_R32_UINT
+					buffer_d3d11->offset);
+			}
+
 			if (buffer_d3d11->usage_flags & RJD_GFX_MESH_BUFFER_USAGE_VERTEX_CONSTANT ||
 				buffer_d3d11->usage_flags & RJD_GFX_MESH_BUFFER_USAGE_PIXEL_CONSTANT) {
 
@@ -729,7 +753,10 @@ struct rjd_result rjd_gfx_command_pass_draw(struct rjd_gfx_context* context, str
 			}
 		}
 
-		ID3D11DeviceContext1_Draw(cmd_buffer_d3d11->deferred_context, mesh_d3d11->count_vertices, 0);
+		if (mesh_d3d11->primitive == RJD_GFX_PRIMITIVE_TYPE_INDEXED_TRIANGLES)
+			ID3D11DeviceContext1_DrawIndexed(cmd_buffer_d3d11->deferred_context, mesh_d3d11->count_indices, 0, 0);
+		else
+			ID3D11DeviceContext1_Draw(cmd_buffer_d3d11->deferred_context, mesh_d3d11->count_vertices, 0);
 	}
 
 	return RJD_RESULT_OK();
@@ -1054,9 +1081,10 @@ struct rjd_result rjd_gfx_mesh_create_vertexed(struct rjd_gfx_context* context, 
 		const void* data = NULL;
 
 		if (desc_buffer->usage_flags & RJD_GFX_MESH_BUFFER_USAGE_VERTEX) {
-			if (desc_buffer->usage_flags & RJD_GFX_MESH_BUFFER_USAGE_VERTEX_CONSTANT ||
+			if (desc_buffer->usage_flags & RJD_GFX_MESH_BUFFER_USAGE_INDEX ||
+				desc_buffer->usage_flags & RJD_GFX_MESH_BUFFER_USAGE_VERTEX_CONSTANT ||
 				desc_buffer->usage_flags & RJD_GFX_MESH_BUFFER_USAGE_PIXEL_CONSTANT) {
-				return RJD_RESULT("Vertex buffers cannot also be constant buffers.");
+				return RJD_RESULT("Vertex buffers cannot also be index or constant buffers.");
 			}
 
 				buffer_size = desc_buffer->common.vertex.length;
@@ -1070,6 +1098,26 @@ struct rjd_result rjd_gfx_mesh_create_vertexed(struct rjd_gfx_context* context, 
 				if (stride == 0) {
 					return RJD_RESULT("Vertex buffers must have a stride larger than 0.");
 				}
+		}
+
+		if (desc_buffer->usage_flags & RJD_GFX_MESH_BUFFER_USAGE_INDEX) {
+			if (desc_buffer->usage_flags & RJD_GFX_MESH_BUFFER_USAGE_VERTEX ||
+				desc_buffer->usage_flags & RJD_GFX_MESH_BUFFER_USAGE_VERTEX_CONSTANT ||
+				desc_buffer->usage_flags & RJD_GFX_MESH_BUFFER_USAGE_PIXEL_CONSTANT) {
+				return RJD_RESULT("Index buffers cannot also be vertex or constant buffers.");
+			}
+
+			buffer_size = desc_buffer->common.vertex.length;
+			stride = desc_buffer->common.vertex.stride;
+			data = desc_buffer->common.vertex.data;
+			flags_bind = D3D11_BIND_INDEX_BUFFER;
+
+			if (desc_buffer->shader_slot_d3d11 != 0) {
+				return RJD_RESULT("Index buffer index must be in slot 0");
+			}
+			if (stride == 0) {
+				return RJD_RESULT("Index buffers must have a stride larger than 0.");
+			}
 		}
 
 		if (desc_buffer->usage_flags & RJD_GFX_MESH_BUFFER_USAGE_VERTEX_CONSTANT || 
@@ -1132,10 +1180,11 @@ struct rjd_result rjd_gfx_mesh_create_vertexed(struct rjd_gfx_context* context, 
 	}
 
 	struct rjd_gfx_mesh_d3d11 mesh_d3d11 = {
+		.primitive = desc.primitive,
 		.buffers = buffers,
 		.count_buffers = desc.count_buffers,
 		.count_vertices = desc.count_vertices,
-		.primitive = desc.primitive,
+		.count_indices = desc.count_indices,
 	};
 
 	rjd_slotmap_insert(context_d3d11->slotmap_meshes, mesh_d3d11, &out->handle);
@@ -1249,6 +1298,7 @@ D3D_PRIMITIVE_TOPOLOGY rjd_gfx_primitive_to_d3d11(enum rjd_gfx_primitive_type pr
 	switch (primitive)
 	{
 		case RJD_GFX_PRIMITIVE_TYPE_TRIANGLES: return D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
+		case RJD_GFX_PRIMITIVE_TYPE_INDEXED_TRIANGLES: return D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST;
 	}
 
 	RJD_ASSERTFAIL("Unhandled primitive type %d", primitive);
