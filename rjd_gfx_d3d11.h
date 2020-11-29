@@ -86,6 +86,7 @@ struct rjd_gfx_command_buffer_d3d11
 {
 	ID3D11DeviceContext1* deferred_context;
 	ID3D11RenderTargetView* render_target;
+	ID3D11DepthStencilView* depth_stencil;
 };
 
 struct rjd_gfx_context_d3d11
@@ -514,18 +515,95 @@ struct rjd_result rjd_gfx_command_pass_begin(struct rjd_gfx_context* context, st
 	}
 
 	if (rjd_gfx_texture_isbackbuffer(command->render_target)) {
-		ID3D11Texture2D* texture_backbuffer = NULL;
-		HRESULT hr = IDXGISwapChain_GetBuffer(context_d3d11->swapchain, 0, &IID_ID3D11Texture2D, (void**)&texture_backbuffer);
-		if (FAILED(hr)) {
-			return rjd_gfx_translate_hresult(hr);
+
+		UINT screenWidth = 0, screenHeight = 0;
+
+		// RenderTargetView
+		{
+			ID3D11Texture2D* texture_backbuffer = NULL;
+			HRESULT hr = IDXGISwapChain_GetBuffer(context_d3d11->swapchain, 0, &IID_ID3D11Texture2D, (void**)&texture_backbuffer);
+			if (FAILED(hr)) {
+				return rjd_gfx_translate_hresult(hr);
+			}
+
+			hr = ID3D11Device_CreateRenderTargetView(context_d3d11->device, (ID3D11Resource*)texture_backbuffer, NULL, &cmd_buffer_d3d11->render_target);
+			if (FAILED(hr)) {
+				return rjd_gfx_translate_hresult(hr);
+			}
+
+			D3D11_TEXTURE2D_DESC desc_backbuffer;
+			ID3D11Texture2D_GetDesc(texture_backbuffer, &desc_backbuffer);
+			screenWidth = desc_backbuffer.Width;
+			screenHeight = desc_backbuffer.Height;
+
+			ID3D11Texture2D_Release(texture_backbuffer);
 		}
 
-		hr = ID3D11Device_CreateRenderTargetView(context_d3d11->device, (ID3D11Resource*)texture_backbuffer, NULL, &cmd_buffer_d3d11->render_target);
-		if (FAILED(hr)) {
-			return rjd_gfx_translate_hresult(hr);
-		}
+		// DepthStencilView
+		// XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX TODO: Circle back and verify there aren't any memory/resource leaks here and we could proably move most of this to an init stage
+		{
+			// Stencil Desc
+			D3D11_DEPTH_STENCIL_DESC desc_depthstencil = {
+				.DepthEnable = TRUE,
+				.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL,
+				.DepthFunc = D3D11_COMPARISON_LESS,
 
-		ID3D11Texture2D_Release(texture_backbuffer);
+				.StencilEnable = TRUE,
+				.StencilReadMask = 0xFF,
+				.StencilWriteMask = 0xFF,
+
+				.FrontFace.StencilFailOp = D3D11_STENCIL_OP_KEEP,
+				.FrontFace.StencilDepthFailOp = D3D11_STENCIL_OP_INCR,
+				.FrontFace.StencilPassOp = D3D11_STENCIL_OP_KEEP,
+				.FrontFace.StencilFunc = D3D11_COMPARISON_ALWAYS,
+
+				.BackFace.StencilFailOp = D3D11_STENCIL_OP_KEEP,
+				.BackFace.StencilDepthFailOp = D3D11_STENCIL_OP_DECR,
+				.BackFace.StencilPassOp = D3D11_STENCIL_OP_KEEP,
+				.BackFace.StencilFunc = D3D11_COMPARISON_ALWAYS,
+			};
+			ID3D11DepthStencilState* depthstencil_state = NULL;
+			HRESULT hr = ID3D11Device_CreateDepthStencilState(context_d3d11->device, &desc_depthstencil, &depthstencil_state);
+			if (FAILED(hr)) {
+				return rjd_gfx_translate_hresult(hr);
+			}
+
+			// Set Stencil Desc
+			ID3D11DeviceContext_OMSetDepthStencilState(cmd_buffer_d3d11->deferred_context, depthstencil_state, 1);
+
+			// DepthStencil Texture
+			D3D11_TEXTURE2D_DESC desc_depthbuffer = {
+				.Width = screenWidth,
+				.Height = screenHeight,
+				.MipLevels = 1,
+				.ArraySize = 1,
+				.Format = DXGI_FORMAT_D24_UNORM_S8_UINT,
+				.SampleDesc.Count = 1,
+				.SampleDesc.Quality = 0,
+				.Usage = D3D11_USAGE_DEFAULT,
+				.BindFlags = D3D11_BIND_DEPTH_STENCIL,
+				.CPUAccessFlags = 0,
+				.MiscFlags = 0,
+			};
+			ID3D11Texture2D* texture_depthstencil = NULL;
+			hr = ID3D11Device_CreateTexture2D(context_d3d11->device, &desc_depthbuffer, NULL, &texture_depthstencil);
+			if (FAILED(hr)) {
+				return rjd_gfx_translate_hresult(hr);
+			}
+
+			// DepthStencil View
+			D3D11_DEPTH_STENCIL_VIEW_DESC desc_depthstencil_view = {
+				.Format = desc_depthbuffer.Format,
+				.ViewDimension = D3D11_DSV_DIMENSION_TEXTURE2D,
+				.Flags = 0,
+				.Texture2D.MipSlice = 0,
+			};
+
+			hr = ID3D11Device_CreateDepthStencilView(context_d3d11->device, (ID3D11Resource*)texture_depthstencil, &desc_depthstencil_view, &cmd_buffer_d3d11->depth_stencil);
+			if (FAILED(hr)) {
+				return rjd_gfx_translate_hresult(hr);
+			}
+		}
 
 	} else {
 		RJD_ASSERTFAIL("non-backbuffer render targets are unimplemented"); // TODO
@@ -534,7 +612,8 @@ struct rjd_result rjd_gfx_command_pass_begin(struct rjd_gfx_context* context, st
 	struct rjd_gfx_rgba rgba_backbuffer = rjd_gfx_format_value_to_rgba(command->clear_color);
 	ID3D11DeviceContext_ClearRenderTargetView(cmd_buffer_d3d11->deferred_context, cmd_buffer_d3d11->render_target, rgba_backbuffer.v);
 
-	//ID3D11DeviceContext_ClearDepthStencilView(cmd_buffer_d3d11->deferred_context, cmd_buffer_d3d11->depth_stencil, color); // TODO
+	// XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX TODO: use command->clear_depthstencil (right now it is missing info that D3D11 expects)
+	ID3D11DeviceContext_ClearDepthStencilView(cmd_buffer_d3d11->deferred_context, cmd_buffer_d3d11->depth_stencil, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
 
 	return RJD_RESULT_OK();
 }
@@ -559,7 +638,7 @@ struct rjd_result rjd_gfx_command_pass_draw(struct rjd_gfx_context* context, str
 	ID3D11DeviceContext1_IASetInputLayout(cmd_buffer_d3d11->deferred_context, pipeline_state_d3d11->vertex_layout);
 	ID3D11DeviceContext1_RSSetState(cmd_buffer_d3d11->deferred_context, pipeline_state_d3d11->rasterizer_state);
 
-	ID3D11DeviceContext1_OMSetRenderTargets(cmd_buffer_d3d11->deferred_context, 1, &cmd_buffer_d3d11->render_target, NULL); // TODO depthstencil target
+	ID3D11DeviceContext1_OMSetRenderTargets(cmd_buffer_d3d11->deferred_context, 1, &cmd_buffer_d3d11->render_target, cmd_buffer_d3d11->depth_stencil);
 
 	struct rjd_gfx_shader_d3d11* shader_vertex_d3d11 = rjd_slotmap_get(context_d3d11->slotmap_shaders, pipeline_state_d3d11->shader_vertex.handle);
 	struct rjd_gfx_shader_d3d11* shader_pixel_d3d11 = rjd_slotmap_get(context_d3d11->slotmap_shaders, pipeline_state_d3d11->shader_pixel.handle);
@@ -923,8 +1002,8 @@ struct rjd_result rjd_gfx_pipeline_state_create(struct rjd_gfx_context* context,
 			.CullMode = rjd_gfx_cull_to_d3d(desc.cull_mode),
 			.FrontCounterClockwise = desc.winding_order == RJD_GFX_WINDING_ORDER_COUNTERCLOCKWISE,
 			.DepthBias = 0,
-			.DepthBiasClamp = 1.0f,
-			.SlopeScaledDepthBias = 1.0f,
+			.DepthBiasClamp = 0.0f,
+			.SlopeScaledDepthBias = 0.0f,
 			.DepthClipEnable = TRUE,
 			.ScissorEnable = FALSE, // TODO support stencils
 			.MultisampleEnable = FALSE, // TODO MSAA
